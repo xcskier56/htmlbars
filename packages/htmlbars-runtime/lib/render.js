@@ -75,65 +75,146 @@ RenderResult.build = function(env, scope, template, options, contextualElement) 
   return new RenderResult(env, scope, options, rootNode, ownerNode, nodes, fragment, template, shouldSetContent);
 };
 
+// In ie8, input type attr can only be set before the element has been added to any node.
+// This means that we have to set the type in the buildFragment function because that is
+// where the element is appended to its parent node.
+// This means that we have to remove it from the buildRenderNodes function
 export function manualElement(tagName, attributes, _isEmpty) {
   var statements = [];
-
-  for (var key in attributes) {
-    if (typeof attributes[key] === 'string') { continue; }
-    statements.push(["attribute", key, attributes[key]]);
-  }
-
   var isEmpty = _isEmpty || voidMap[tagName];
+  var key, template, keys;
+  if (tagName === 'input') {
+    for (key in attributes) {
+      // We need to skip adding the type attr to the statements.
+      if (typeof attributes[key] === "string" || key === 'type') { continue; }
+      statements.push(["attribute", key, attributes[key]]);
+    }
+    if (!isEmpty) {
+      statements.push(['content', 'yield']);
+    }
 
-  if (!isEmpty) {
-    statements.push(['content', 'yield']);
+    template = {
+      isInput: true,
+      arity: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      // Passing the environment so that bound attributes can
+      // at least be updated once
+      buildFragment: function buildFragment(env) {
+        var dom = env.dom;
+        var el0 = dom.createDocumentFragment();
+        var el1 = dom.createElement(tagName);
+
+        for (var key in attributes) {
+          if (key === 'type') {
+            if (attributes[key][0] === 'value') {
+              dom.setAttribute(el1, key, attributes[key][1]);
+              continue;
+            } else if (attributes[key][0] === 'get') {
+              keys = attributes[key][1].split('.');
+              var tmpVal = env;
+              for(var i=0; i< keys.length; i++) {
+                tmpVal = tmpVal[keys[i]];
+              }
+
+              dom.setAttribute(el1, key, tmpVal);
+              continue;
+            } else {
+              dom.setAttribute(el1, key, 'text');
+              continue;
+            }
+          } else if (typeof attributes[key] !== "string") {
+            continue;
+          }
+          dom.setAttribute(el1, key, attributes[key]);
+        }
+
+        if (!isEmpty) {
+          var el2 = dom.createComment("");
+          dom.appendChild(el1, el2);
+        }
+
+        dom.appendChild(el0, el1);
+
+        return el0;
+      },
+      buildRenderNodes: function buildRenderNodes(dom, fragment) {
+        var element = dom.childAt(fragment, [0]);
+        var morphs = [];
+
+        for (var key in attributes) {
+          if (typeof attributes[key] === "string" || key === 'type') { continue; }
+          morphs.push(dom.createAttrMorph(element, key));
+        }
+
+        if (!isEmpty) {
+          morphs.push(dom.createMorphAt(element, 0, 0));
+        }
+
+        return morphs;
+      },
+      statements: statements,
+      locals: [],
+      templates: []
+    };
+  } else {
+    for (key in attributes) {
+      if (typeof attributes[key] === "string") { continue; }
+      statements.push(["attribute", key, attributes[key]]);
+    }
+
+    if (!isEmpty) {
+      statements.push(['content', 'yield']);
+    }
+
+    template = {
+      arity: 0,
+      cachedFragment: null,
+      hasRendered: false,
+      buildFragment: function buildFragment(dom) {
+        var el0 = dom.createDocumentFragment();
+        if (tagName === "svg") {
+          dom.setNamespace(svgNamespace);
+        }
+        var el1 = dom.createElement(tagName);
+
+        for (var key in attributes) {
+          if (typeof attributes[key] !== "string") {
+            continue;
+          }
+          dom.setAttribute(el1, key, attributes[key]);
+        }
+
+        if (!isEmpty) {
+          var el2 = dom.createComment("");
+          dom.appendChild(el1, el2);
+        }
+
+        dom.appendChild(el0, el1);
+
+        return el0;
+      },
+      buildRenderNodes: function buildRenderNodes(dom, fragment) {
+        var element = dom.childAt(fragment, [0]);
+        var morphs = [];
+
+        for (var key in attributes) {
+          if (typeof attributes[key] === "string") {
+            continue;
+          }
+          morphs.push(dom.createAttrMorph(element, key));
+        }
+
+        if (!isEmpty) {
+          morphs.push(dom.createMorphAt(element, 0, 0));
+        }
+        return morphs;
+      },
+      statements: statements,
+      locals: [],
+      templates: []
+    };
   }
-
-  var template = {
-    arity: 0,
-    cachedFragment: null,
-    hasRendered: false,
-    buildFragment: function buildFragment(dom) {
-      var el0 = dom.createDocumentFragment();
-      if (tagName === 'svg') {
-        dom.setNamespace(svgNamespace);
-      }
-      var el1 = dom.createElement(tagName);
-
-      for (var key in attributes) {
-        if (typeof attributes[key] !== 'string') { continue; }
-        dom.setAttribute(el1, key, attributes[key]);
-      }
-
-      if (!isEmpty) {
-        var el2 = dom.createComment("");
-        dom.appendChild(el1, el2);
-      }
-
-      dom.appendChild(el0, el1);
-
-      return el0;
-    },
-    buildRenderNodes: function buildRenderNodes(dom, fragment) {
-      var element = dom.childAt(fragment, [0]);
-      var morphs = [];
-
-      for (var key in attributes) {
-        if (typeof attributes[key] === 'string') { continue; }
-        morphs.push(dom.createAttrMorph(element, key));
-      }
-
-      if (!isEmpty) {
-        morphs.push(dom.createMorphAt(element, 0, 0));
-      }
-
-      return morphs;
-    },
-    statements: statements,
-    locals: [],
-    templates: []
-  };
-
   return template;
 }
 
@@ -298,9 +379,12 @@ export function createChildMorph(dom, parentMorph, contextualElement) {
   return morph;
 }
 
-export function getCachedFragment(template, env) {
-  var dom = env.dom, fragment;
-  if (env.useFragmentCache && dom.canClone) {
+function getCachedFragment(template, env) {
+  var dom = env.dom,
+      fragment;
+  if (template.isInput) {
+    fragment = template.buildFragment(env);
+  } else if (env.useFragmentCache && dom.canClone) {
     if (template.cachedFragment === null) {
       fragment = template.buildFragment(dom);
       if (template.hasRendered) {
